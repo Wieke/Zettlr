@@ -15,16 +15,16 @@
 const clarityIcons = require('@clr/icons').ClarityIcons
 require('@clr/icons/shapes/all-shapes')
 const fs = require('fs').promises
+const isdir = require("../../common/util/is-dir")
 const path = require('path')
 
 async function loadCustomIcons (dir) {
   let list = await fs.readdir(dir)
   for (let name of list){
     let p = path.join(dir, name)
-    let stat = await fs.stat(p)
-    if (stat.isDirectory()) {
+    if (isdir(p)) {
       await loadCustomIcons(p)
-    } else if (stat.isFile()) {
+    } else {
       let ext = path.extname(name)
       if (ext && ext.toLowerCase() === '.svg') {
         let data = await fs.readFile(p)
@@ -36,4 +36,4 @@ async function loadCustomIcons (dir) {
   }
 }
 
-module.exports = () => loadCustomIcons(path.join(__dirname, '../assets/icons'))
+module.exports = () => loadCustomIcons(path.join(__dirname, '..', 'assets', 'icons'))
