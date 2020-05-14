@@ -17,22 +17,23 @@ require('@clr/icons/shapes/all-shapes')
 const fs = require('fs').promises
 const path = require('path')
 
-function loadCustomIcons (dir) {
-  return fs.readdir(dir, { withFileTypes: true })
-    .then(list => Promise.all(list.map(x => {
-      if (x.isDirectory()) {
-        return loadCustomIcons(path.join(dir, x.name))
-      } else if (x.isFile()) {
-        let ext = path.extname(x.name)
-        if (ext && ext.toLowerCase() === '.svg') {
-          return fs.readFile(path.join(dir, x.name)).then(data => {
-            let icon = {}
-            icon[path.basename(x.name, ext)] = data.toString()
-            clarityIcons.add(icon)
-          })
-        }
+async function loadCustomIcons (dir) {
+  let list = await fs.readdir(dir)
+  for (let name of list){
+    let p = path.join(dir, name)
+    let stat = await fs.stat(p)
+    if (stat.isDirectory()) {
+      await loadCustomIcons(p)
+    } else if (stat.isFile()) {
+      let ext = path.extname(name)
+      if (ext && ext.toLowerCase() === '.svg') {
+        let data = await fs.readFile(p)
+        let icon = {}
+        icon[path.basename(name, ext)] = data.toString()
+        clarityIcons.add(icon)
       }
-    })))
+    }
+  }
 }
 
 module.exports = () => loadCustomIcons(path.join(__dirname, '../assets/icons'))
