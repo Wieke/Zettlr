@@ -29,9 +29,11 @@
       transition: @mode-transition background-color ease;
       color:var(--c-primary);
 
-      .sorter .sortDirection, .sorter .sortType {
+      .sorter {
         background-color:var(--grey-1);
-        &:hover { color:var(--grey-5); }
+        .sortDirection:hover, .sortType:hover {
+           color:var(--grey-5);
+        }
       }
     }
 
