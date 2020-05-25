@@ -6,6 +6,7 @@ This release contains several breaking changes to 1.6 due to heavy internal refa
 
 * Your virtual directories will be gone after installing.
 * Projects will be incorporated into the `.ztr-directory`-files, which means that you need to extract these files (or backup them) if you plan to roll back to 1.6 or earlier, lest you will lose the project settings.
+* `Cmd/Ctrl+W` will now attempt to close open tabs first before closing the window. To close the main window directly, use `Cmd/Ctrl+Shift+W`.
 
 ## GUI and Functionality
 
@@ -15,6 +16,7 @@ This release contains several breaking changes to 1.6 due to heavy internal refa
     - Drag and drop the tabs to re-sort their order.
     - Get going where you left of the day before: Open files are persisted during restarts of the application.
 - **New Feature**: RTL support! Now whether you are writing in Hebrew, Persian, Urdu or any other right-to-left writing system, you can do so now. We've added support for the respective options of CodeMirror in the "Preferences -> Editor" tab.
+- **New Feature**: You can now direct Zettlr to automatically create new files if you click on an internal link that does not match a file. Thanks to @halcyonquest for their contribution!
 - If available, a title from a YAML frontmatter will be appended to the displayed file entry when linking files.
 - Copying images from the Explorer/Finder/file browser now offers to insert them into the document, copying them over to the assets directory.
 - The popups are now more resilient against accidental closing, just like the dialogs.
@@ -51,6 +53,16 @@ This release contains several breaking changes to 1.6 due to heavy internal refa
 - Sort buttons now show how the directory is currently sorted. One shows and toggles what is being sorted by (name or time). The other shows and toggles what direction is being sorted ine (ascending or descending).
 - Modified display settings are now applied on configuration changes (not just after clicking somewhere in the document).
 - Modals now also apply a dark theming if in dark mode.
+- Fixed image exports.
+- Fixed correct exporting of images when exporting to Textbundle and Textpack.
+- Fixed revealJS presentations which now display Math.
+- Fixed the autocomplete behaviour, especially with cursor movement.
+- If there is a selection in the document, its contents are used to fill in the search field now. Furthermore, the occurrences of the search term are now already highlighted without you having to search first.
+- If there is a selection in the document, its contents fill up the global search field on focus, if the global search field does not have any contents.
+- Fixed wrong display of project property table of content evaluation level.
+- When linking files, Zettlr will now present you those files that match with at least one tag with the currently active file, making cross-linking of notes as easy as typing the link-start and hitting the arrow down-key. Bonus: It'll present you these options even if the files reside in a completely different root directory.
+- Fixed behaviour of nested checkboxes.
+- Fixed escaping of special TeX characters in input value fields (e.g. project properties).
 
 ## Under the Hood
 
@@ -76,6 +88,12 @@ This release contains several breaking changes to 1.6 due to heavy internal refa
 - The Pandoc-command is now logged in its resolved state immediately before actually being run.
 - Windows installers are finally signed.
 - Switched back to the `package.json` configuration for electron-builder, because, well, Electron.
+- Fix a lot of unused and weirdly coded code.
+- Added a flag to determine if the Zettlr version has changed, indicating an update (or downgrade). Based on this, the FSAL will clear its cache on boot.
+- Added command-line flag `--clear-cache` to programmatically clear the FSAL cache on startup.
+- Moved the `forceOpen`-functionality to a command.
+- Refactored the autocompletion logic and moved it out into its own designated class to reduce the size of the `ZettlrEditor` class.
+- Refactored the logic for building the bibliography in an attempt to further reduce the size of the `ZettlrEditor` class.
 
 # 1.6.0
 

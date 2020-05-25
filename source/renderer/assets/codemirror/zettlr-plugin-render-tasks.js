@@ -14,10 +14,19 @@
 
   var taskRE = /^(\s*)([-+*]) \[( |x)\] /g // Matches `- [ ]` and `- [x]`
   var taskMarkers = []
+  var currentDocID = null
 
   CodeMirror.commands.markdownRenderTasks = function (cm) {
     let i = 0
     let match
+
+    if (currentDocID !== cm.doc.id) {
+      currentDocID = cm.doc.id
+      for (let marker of taskMarkers) {
+        if (marker.find()) marker.clear()
+      }
+      taskMarkers = [] // Flush it away!
+    }
 
     // First remove links that don't exist anymore. As soon as someone
     // moves the cursor into the link, it will be automatically removed,
@@ -74,9 +83,7 @@
 
       let cbox = document.createElement('input')
       cbox.type = 'checkbox'
-      if (checked) {
-        cbox.checked = true
-      }
+      if (checked) cbox.checked = true
 
       let textMarker = cm.markText(
         curFrom, curTo,
@@ -93,6 +100,7 @@
 
         // First, recalculate where the checkbox actually is.
         let markerLine = textMarker.find().from.line
+        taskRE.lastIndex = 0
         let m = taskRE.exec(cm.getLine(markerLine))
         let leadingSpaces = (m && m[1]) ? m[1].length : 0
         let curFrom = { 'line': markerLine, 'ch': 0 + leadingSpaces }

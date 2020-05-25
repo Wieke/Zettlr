@@ -24,16 +24,16 @@ const GlobalSearch = require('./util/global-search')
 const ZettlrStore = require('./zettlr-store')
 const createSidebar = require('./assets/vue/vue-sidebar')
 
+const path = require('path')
+
 const { remote, shell, clipboard } = require('electron')
 
 const generateId = require('../common/util/generate-id')
 const loadI18nRenderer = require('../common/lang/load-i18n-renderer')
+const matchFilesByTags = require('../common/util/match-files-by-tags')
 
 const reconstruct = require('./util/reconstruct-tree')
-
 const loadicons = require('./util/load-icons')
-
-const path = require('path')
 
 // Pull the poll-time from the data
 const POLL_TIME = require('../common/data.json').poll_time
@@ -84,6 +84,23 @@ class ZettlrRenderer {
         this.beginSearch(term)
       }
     }
+  }
+
+  /**
+   * Matches the given file with potential candidates based on the used tags.
+   * @param {number} hash The hash of the file to match candidates to.
+   * @returns {Array} An array with potential candidates
+   */
+  matchFile (hash) {
+    if (!hash) return []
+    let fileDescriptor = this.findObject(hash)
+    if (!fileDescriptor) return []
+    return matchFilesByTags(fileDescriptor, this._paths).map(e => {
+      return {
+        'fileDescriptor': this.findObject(e.hash),
+        'matches': e.matches
+      }
+    })
   }
 
   /**
@@ -333,8 +350,9 @@ class ZettlrRenderer {
       this.setCurrentDir(null) // Reset
     }
 
-    // Trigger a refresh in the attachment pane
+    // Trigger a refresh for all affected places
     this._attachments.refresh()
+    this._editor.signalUpdateFileAutocomplete()
 
     // Pass on the new paths object as is to the store.
     global.store.renewItems(nData)
@@ -348,12 +366,12 @@ class ZettlrRenderer {
     * @param  {ZettlrFile} file The new file object.
     */
   refreshCurrentFile (file) {
-    if (this.getActiveFile()) {
+    let f = this.getActiveFile()
+    if (f) {
       // The only things that could've changed and that are immediately
       // visible to the user (which is why we need to update them) are:
       // modtime, file meta, tags, id. The rest can wait until the next big
       // update.
-      let f = this.getActiveFile()
       f.modtime = file.modtime
       f.tags = file.tags
       f.wordCount = file.wordCount
@@ -362,6 +380,9 @@ class ZettlrRenderer {
       f.id = file.id
       // Trigger a redraw of this specific file in the preview list.
       this._preview.refresh()
+
+      // Also, the bibliography has likely changed
+      this._attachments.refreshBibliography(this._editor.getValue())
 
       // Finally, synchronize the file descriptors in the editor
       this._editor.syncFiles()
@@ -401,6 +422,10 @@ class ZettlrRenderer {
     let oldDir = this.findObject(oldHash)
 
     if (oldDir && oldDir.type === 'directory') {
+      let tempParent = dir.parent
+      reconstruct(dir) // Reconstruct may overwrite the parent with null
+      dir.parent = tempParent
+
       // We'll be patching the store, as this
       // will also update the renderer._paths.
       global.store.patch(oldHash, dir)
@@ -425,8 +450,8 @@ class ZettlrRenderer {
     // First end any search in the store, if applicable.
     global.store.commitEndSearch()
 
-    // Immediately send out a force-open command to see if a file matches
-    this._ipc.send('force-open', term)
+    // Also send a "soft" force-open command in order to open
+    this._ipc.send('force-open-if-exists', term)
 
     // Make sure the file list is visible
     if (!this._sidebar.isFileListVisible()) this._sidebar.toggleFileList()
@@ -472,18 +497,11 @@ class ZettlrRenderer {
    * @param {Boolean} [forceOpen=false] If true, Zettlr will directly open the file
    */
   autoSearch (term, forceOpen = false) {
-    if (!forceOpen) {
-      // Insert the term into the search field and commence search.
-      this._toolbar.setSearch(term)
-      this.beginSearch(term)
-    } else {
-      // Don't search, simply tell main to open the file
-      this._ipc.send('force-open', term)
-      // Also initiate a search to be run accordingly for any files that
-      // might reference the file.
-      this._toolbar.setSearch(term)
-      this.beginSearch(term)
-    }
+    // Also initiate a search to be run accordingly for any files that
+    // might reference the file.
+    this._toolbar.setSearch(term)
+    this.beginSearch(term)
+    if (forceOpen) this._ipc.send('force-open', term)
   }
 
   /**
@@ -537,6 +555,14 @@ class ZettlrRenderer {
   }
 
   /**
+   * Called by the editor instance to indicate that the current activeFile has changed.
+   */
+  signalActiveFileChanged () {
+    // Also, the bibliography has likely changed
+    this._attachments.refreshBibliography(this._editor.getValue())
+  }
+
+  /**
    * Closes the current file
    * @param {number} hash The hash of the file to be closed.
    */
@@ -560,7 +586,7 @@ class ZettlrRenderer {
       file = {}
     }
     file.content = this._editor.getValue()
-    file.wordcount = this._editor.getWrittenWords()
+    file.wordCountOnSave = this._editor.getWrittenWords()
     this._ipc.send('file-save', file)
   }
 
@@ -618,6 +644,7 @@ class ZettlrRenderer {
     this._currentDir = this.findObject(newdir) // Find the dir (hash) in our own paths object
     global.store.selectDirectory(newdir)
     this._attachments.refresh()
+    this._editor.signalUpdateFileAutocomplete() // On every directory change
   }
 
   /**
@@ -722,7 +749,7 @@ class ZettlrRenderer {
    * update it here.
    * @param {Object} bib A new citeproc bibliography object.
    */
-  setBibliography (bib) { this._attachments.refreshBibliography(bib) }
+  setBibliography (bib) { this._attachments.setBibliographyContents(bib) }
 
   /**
    * Simply indicates to main to set the modified flag.

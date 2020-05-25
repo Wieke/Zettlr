@@ -50,15 +50,9 @@ function applyCache (origFile, cachedFile) {
  * @param {Object} origFile The file to cache
  */
 function cacheFile (origFile, cacheAdapter) {
-  let cache = {}
-  for (let prop of Object.keys(origFile)) {
-    // Save everything to the cache object except the parent to
-    // prevent circular structures throwing errors on persisting.
-    if (prop === 'parent') continue
-    cache[prop] = origFile[prop]
-  }
-
-  cacheAdapter.set(cache.hash, cache)
+  let copy = Object.assign({}, origFile)
+  delete copy.parent // Make sure not to store circular properties
+  cacheAdapter.set(origFile.hash, copy)
 }
 
 function metadata (fileObject) {
@@ -84,6 +78,21 @@ function metadata (fileObject) {
     'frontmatter': fileObject.frontmatter,
     'linefeed': fileObject.linefeed,
     'modified': fileObject.modified
+  }
+}
+
+/**
+ * Updates the file metadata (such as modification time) from lstat.
+ *
+ * @param   {Object}  fileObject  The object to be updated
+ * @return  {void}              Does not return
+ */
+async function updateFileMetadata (fileObject) {
+  try {
+    let stat = await fs.lstat(fileObject)
+    fileObject.modtime = stat.mtimeMs
+  } catch (e) {
+    // Do nothing ...
   }
 }
 
@@ -126,11 +135,17 @@ async function parseFile (filePath, cache, parent = null) {
 
   // Before reading in the full file and parsing it,
   // let's check if the file has been changed
+  let hasCache = false
   if (cache.has(file.hash)) {
     let cachedFile = cache.get(file.hash)
     // If the modtime is still the same, we can apply the cache
-    if (cachedFile.modtime === file.modtime) applyCache(file, cachedFile)
-  } else {
+    if (cachedFile.modtime === file.modtime) {
+      applyCache(file, cachedFile)
+      hasCache = true
+    }
+  }
+
+  if (!hasCache) {
     // Read in the file, parse the contents and make sure to cache the file
     let content = await fs.readFile(filePath, { encoding: 'utf8' })
     parseFileContents(file, content)
@@ -249,15 +264,18 @@ module.exports = {
     // Loads the content of a file from disk
     return fs.readFile(fileObject.path, { encoding: 'utf8' })
   },
-  'save': async function (fileObject, content) {
+  'save': async function (fileObject, cache, content) {
     await fs.writeFile(fileObject.path, content)
+    // Afterwards, retrieve the now current modtime
+    await updateFileMetadata(fileObject)
     // Make sure to keep the file object itself as well as the tags updated
     global.tags.remove(fileObject.tags)
     parseFileContents(fileObject, content)
     global.tags.report(fileObject.tags)
     fileObject.modified = false // Always reset the modification flag.
+    cacheFile(fileObject, cache)
   },
-  'rename': async function (fileObject, options) {
+  'rename': async function (fileObject, cache, options) {
     let oldPath = fileObject.path
     let newPath = path.join(path.dirname(fileObject.path), options.name)
     await fs.rename(oldPath, newPath)
@@ -265,6 +283,9 @@ module.exports = {
     fileObject.path = newPath
     fileObject.hash = hash(newPath)
     fileObject.name = options.name
+    // Afterwards, retrieve the now current modtime
+    await updateFileMetadata(fileObject)
+    cacheFile(fileObject, cache)
   },
   'remove': async function (fileObject) {
     // await fs.unlink(fileObject.path)
@@ -275,10 +296,6 @@ module.exports = {
   },
   'parse': async function (filePath, cache, parent = null) {
     return parseFile(filePath, cache, parent)
-  },
-  'updateFile': function (fileObject, newContents) {
-    // Updates a file object with new contents
-    return parseFileContents(fileObject, newContents)
   },
   'setTarget': function (fileObject, target) {
     fileObject.target = target

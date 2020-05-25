@@ -14,20 +14,19 @@
 */
 
 const path = require('path')
+const hash = require('../common/util/hash')
 const popup = require('./zettlr-popup.js')
 const showdown = require('showdown')
 const Turndown = require('joplin-turndown')
-const turndownGfm = require('joplin-turndown-plugin-gfm')
-const { clipboard } = require('electron')
-const hash = require('../common/util/hash')
 const countWords = require('../common/util/count-words')
-const objectToArray = require('../common/util/object-to-array')
-const { trans } = require('../common/lang/i18n.js')
-const generateKeymap = require('./assets/codemirror/generate-keymap.js')
-const EditorSearch = require('./util/editor-search')
 const EditorTabs = require('./util/editor-tabs')
+const turndownGfm = require('joplin-turndown-plugin-gfm')
 const moveSection = require('./util/editor-move-section')
+const EditorSearch = require('./util/editor-search')
+const { clipboard } = require('electron')
+const generateKeymap = require('./assets/codemirror/generate-keymap.js')
 const openMarkdownLink = require('./util/open-markdown-link')
+const EditorAutocomplete = require('./util/editor-autocomplete')
 
 // The autoloader requires all necessary CodeMirror addons and modes that are
 // used by the main class. It simply folds about 70 lines of code into an extra
@@ -78,11 +77,7 @@ class ZettlrEditor {
     // The user can select or close documents on the tab bar
     this._tabs.setIntentCallback(this._onTabAction.bind(this))
 
-    // The starting position for a tag autocomplete.
-    this._autoCompleteStart = null
-    this._tagDB = [] // Holds all available tags for autocomplete
-    this._citeprocIDs = [] // Holds all available IDs for autocomplete
-    this._currentDatabase = null // Points either to the tagDB or the ID database
+    this._autocomplete = new EditorAutocomplete()
 
     // What elements should be rendered?
     this._renderCitations = false
@@ -117,9 +112,6 @@ class ZettlrEditor {
     })
     this._turndown.use(turndownGfm.gfm)
 
-    // The last array of IDs as fetched from the document
-    this._lastKnownCitationCluster = []
-
     // All individual citations fetched during this session.
     this._citationBuffer = Object.create(null)
 
@@ -143,65 +135,7 @@ class ZettlrEditor {
       placeholder: ' ', // Just an invisible space.
       hintOptions: {
         completeSingle: false, // Don't auto-complete, even if there's only one word available
-        hint: (cm, opt) => {
-          let term = cm.getRange(this._autoCompleteStart, cm.getCursor()).toLowerCase()
-          let completionObject = {
-            'list': Object.keys(this._currentDatabase).filter((key) => {
-              // First search the ID. Second, search the displayText, if available.
-              // Third: return false if nothing else has matched.
-              if (this._currentDatabase[key].text.toLowerCase().indexOf(term) === 0) return true
-              if (this._currentDatabase[key].hasOwnProperty('displayText') && this._currentDatabase[key].displayText.toLowerCase().indexOf(term) >= 0) return true
-              return false
-            })
-              .map(key => this._currentDatabase[key]),
-            'from': this._autoCompleteStart,
-            'to': cm.getCursor()
-          }
-          // Set the autocomplete to false as soon as the user has actively selected something.
-          CodeMirror.on(completionObject, 'pick', (completion) => {
-            // In case the user wants to link a file, intercept during
-            // the process and add the file link according to the user's
-            // preference settings.
-            if (this._currentDatabase !== this._tagDB &&
-              this._currentDatabase !== this._citeprocIDs &&
-              completion.displayText) {
-              // Get the correct setting
-              let linkPref = global.config.get('zkn.linkWithFilename')
-              // Prepare the text to insert, removing the ID if found in the filename
-              let text = completion.displayText
-              if (completion.id && text.indexOf(completion.id) >= 0) {
-                text = text.replace(completion.id, '').trim()
-              }
-              // In case the whole filename consists of the ID, well.
-              // Then, have your ID duplicated.
-              if (text.length === 0) text = completion.displayText
-              let cur = JSON.parse(JSON.stringify(cm.getCursor()))
-              // Check if the linkEnd has been already inserted
-              let line = cm.getLine(cur.line)
-              let end = this._cm.getOption('zkn').linkEnd || ''
-              let prefix = ' '
-              let linkEndMissing = false
-              if (end !== '' && line.substr(cur.ch, end.length) !== end) {
-                // Add the linkend
-                prefix = end + prefix
-                linkEndMissing = true
-              } else {
-                // Advance the cursor so that it is outside of the link again
-                cur.ch += end.length
-                cm.setCursor(cur)
-              }
-              if (linkPref === 'always' || (linkPref === 'withID' && completion.id)) {
-                // We need to add the text after the link.
-                cm.replaceSelection(prefix + text)
-              } else if (linkEndMissing) {
-                cm.replaceSelection(end) // Add the link ending
-              }
-            }
-            this._autoCompleteStart = null
-            this._currentDatabase = null // Reset the database used for the hints.
-          })
-          return completionObject
-        }
+        hint: (cm, opt) => { return this._autocomplete.hint(cm, opt) }
       },
       lineWrapping: true,
       indentUnit: 4, // Indent lists etc. by 4, not 2 spaces (necessary, e.g., for pandoc)
@@ -220,7 +154,9 @@ class ZettlrEditor {
       extraKeys: generateKeymap(this)
     })
 
+    // Set up the helper classes with the CM instance
     this._searcher.setInstance(this._cm)
+    this._autocomplete.init(this._cm)
 
     /**
      * Listen to the beforeChange event to modify pasted image paths into real
@@ -269,50 +205,7 @@ class ZettlrEditor {
     })
 
     this._cm.on('change', (cm, changeObj) => {
-      let cur = cm.getCursor()
       let newText = changeObj.text
-      let linkStart = cm.getOption('zkn').linkStart
-      let textUntilCursor = cm.getLine(cur.line).substr(cur.ch - linkStart.length, linkStart.length)
-      // Show tag autocompletion window, if applicable (or close it)
-      if (newText[0] === '#') {
-        let cur = cm.getCursor()
-        // Make sure the # is either at the beginning
-        // of the line or is preceded by a space.
-        if (cur.ch === 1 || cm.getLine(cur.line).charAt(cur.ch - 2) === ' ') {
-          // Tag autocompletion
-          this._autoCompleteStart = JSON.parse(JSON.stringify(cm.getCursor()))
-          this._currentDatabase = this._tagDB
-          this._cm.showHint()
-        }
-      } else if (newText[0] === '@') {
-        // citeproc-ID autocompletion
-        this._autoCompleteStart = JSON.parse(JSON.stringify(cm.getCursor()))
-        this._currentDatabase = this._citeprocIDs
-        this._cm.showHint()
-      } else if (textUntilCursor === linkStart && this._renderer.getCurrentDir() != null) {
-        // File name autocompletion
-        this._autoCompleteStart = JSON.parse(JSON.stringify(cur))
-        // Build the database in the correct format
-        let db = {}
-        let dir = this._renderer.getCurrentDir()
-
-        // Navigate to the root to include as many files as possible
-        while (dir.parent) dir = dir.parent
-        let tree = objectToArray(dir, 'children').filter(elem => elem.type === 'file')
-
-        for (let file of tree) {
-          let fname = path.basename(file.name, path.extname(file.name))
-          let displayText = fname // Always display the filename
-          if (file.frontmatter && file.frontmatter.title) displayText += ' ' + file.frontmatter.title
-          db[fname] = {
-            'text': file.id || fname, // Use the ID, if given, or the filename
-            'displayText': displayText,
-            'id': file.id || false
-          }
-        }
-        this._currentDatabase = db
-        this._cm.showHint()
-      }
 
       if (changeObj.origin === 'paste' && newText.join(' ').split(' ').length > 10) {
         // In case the user pasted more than ten words don't let these count towards
@@ -344,14 +237,8 @@ class ZettlrEditor {
             // NOTE that the renderer will pull the currently active file from
             // the editor in any case, so the state is maintained.
             this._renderer.saveFile()
-            this.updateCitations()
           }, SAVE_TIMOUT)
         }
-
-        // Always run an update-citations command each time there have been changes
-        this._citationTimeout = setTimeout((e) => {
-          this.updateCitations()
-        }, 500)
       }
     })
 
@@ -457,7 +344,8 @@ class ZettlrEditor {
 
     this._cm.refresh()
 
-    // Finally create the annotateScrollbar object to be able to annotate the scrollbar with search results.
+    // Finally create the annotateScrollbar object to be able to annotate the
+    // scrollbar with search results.
     this._scrollbarAnnotations = this._cm.annotateScrollbar('sb-annotation')
     this._scrollbarAnnotations.update([])
   }
@@ -566,9 +454,6 @@ class ZettlrEditor {
     // If we've got a new file, we need to re-focus the editor
     if (flag === 'new-file') this._cm.focus()
 
-    // Finally, set a timeout for a first run of citation rendering
-    setTimeout(() => { this.updateCitations() }, 1000)
-
     return this
   }
 
@@ -577,7 +462,6 @@ class ZettlrEditor {
    * @param {Number} hash The hash of the file to be swapped
    */
   _swapFile (hash) {
-    console.log('_swapFile called')
     if (this.isReadabilityModeActive()) this.exitReadability()
     // Exchanges the CodeMirror document object
     let file = this._openFiles.find(elem => elem.fileObject.hash === hash)
@@ -600,6 +484,11 @@ class ZettlrEditor {
     // Make sure all headings are rendered etc. pp
     this._fireRenderers()
 
+    // We also need to tell the autocompletion to rebuild the index
+    this.signalUpdateFileAutocomplete()
+
+    this._renderer.signalActiveFileChanged()
+
     // Last but not least: If there are any search results currently
     // display, mark the respective positions.
     this._searcher.markResults(file.fileObject)
@@ -607,7 +496,7 @@ class ZettlrEditor {
     // The sidebar needs to be informed that the active file has changed!
     global.store.set('selectedFile', this._currentHash)
     // Same for the main process
-    global.ipc.send('set-active-file', { 'hash': hash })
+    global.ipc.send('set-active-file', { 'hash': this._currentHash })
   }
 
   /**
@@ -616,14 +505,12 @@ class ZettlrEditor {
    */
   syncFiles (newHashes = this._openFiles.map(elem => elem.fileObject.hash)) {
     let oldHashes = this._openFiles.map(elem => elem.fileObject.hash)
-    console.log('File syncing initiated!', newHashes, oldHashes)
     let lastHashIndex = oldHashes.indexOf(this._currentHash)
     if (lastHashIndex > newHashes.length) lastHashIndex = newHashes.length - 1
 
     // First, close all files no longer present.
     for (let fileDescriptor of this._openFiles) {
       if (!newHashes.includes(fileDescriptor.fileObject.hash)) {
-        console.log(`Closing file ${fileDescriptor.fileObject.name}`)
         this.close(fileDescriptor.fileObject.hash)
       }
     }
@@ -631,12 +518,14 @@ class ZettlrEditor {
     // Then, determine all files we have yet to open anew.
     let toOpen = newHashes.filter(fileHash => !oldHashes.includes(fileHash))
     if (toOpen.length > 0) {
-      console.warn(`There are ${toOpen.length} files we need to pull from main!`)
       for (let fileHash of toOpen) {
-        console.log('Retrieving file ...')
         global.ipc.send('file-request-sync', { 'hash': fileHash })
       }
     }
+
+    // New tags mean we might have potential new file matches --> signal this
+    // to the autocompletion.
+    this.signalUpdateFileAutocomplete()
 
     // Last but not least, exchange the current hash, if not present anymore.
     // We'll use the same index for that, because, purely from a visual
@@ -665,7 +554,6 @@ class ZettlrEditor {
     if (intent === 'close') {
       // Send the close request to main
       global.ipc.send('file-close', { 'hash': hash })
-      // this.close(hash)
     } else if (intent === 'select') {
       this._swapFile(hash)
     } else if (intent === 'new-file') {
@@ -708,7 +596,6 @@ class ZettlrEditor {
 
   /**
    * Hot-swaps the contents of one of the currently opened files.
-   *
    * @param {number} hash The file's hash
    * @param {string} contents The new file contents
    * @memberof ZettlrEditor
@@ -731,7 +618,6 @@ class ZettlrEditor {
     * @return {ZettlrEditor} Chainability.
     */
   close (hash) {
-    console.log('Editor.close called', hash)
     if (!hash) return console.error('Could not close file: No hash provided!')
 
     let fileToClose = this._openFiles.find(elem => elem.fileObject.hash === hash)
@@ -742,12 +628,12 @@ class ZettlrEditor {
     this._openFiles.splice(currentIndex, 1)
 
     if (this._openFiles.length === 0) {
-      console.log('After closing, openFiles is empty')
       // Replace with an empty new doc
       this._cm.swapDoc(CodeMirror.Doc('', MD_MODE))
       this._words = 0
       this._currentHash = null
       this._cm.setOption('markdownImageBasePath', '') // Reset base path
+      this.signalUpdateFileAutocomplete() // Autocomplete with no file match
     }
 
     if (this._currentHash === fileToClose.fileObject.hash && this._openFiles.length > 0) {
@@ -764,6 +650,28 @@ class ZettlrEditor {
 
     return this
   }
+
+  /**
+   * Attempts to close an open tab, and returns true if it did.
+   * @returns {boolean} True, if a tab has been closed, otherwise false.
+   */
+  attemptCloseTab () {
+    if (this._openFiles.length === 0) return false
+
+    if (!this._currentHash) return false
+
+    // Send the close request to main
+    global.ipc.send('file-close', { 'hash': this._currentHash })
+
+    // Indicate that we have indeed been able to close a tab
+    return true
+  }
+
+  /**
+   * Tab switcher functions
+   */
+  selectNextTab () { this._tabs.selectNext() }
+  selectPrevTab () { this._tabs.selectPrevious() }
 
   /**
    * Returns the file that is active (i.e. visible), but only the object, NOT the doc
@@ -881,20 +789,23 @@ class ZettlrEditor {
    * This sets the tag database necessary for the tag autocomplete.
    * @param {Object} tagDB An object (here with prototype due to JSON) containing tags
    */
-  setTagDatabase (tagDB) { this._tagDB = tagDB }
+  setTagDatabase (tagDB) { this._autocomplete.setTagCompletion(tagDB) }
 
   /**
    * Sets the citeprocIDs available to autocomplete to a new list
    * @param {Array} idList An array containing the new IDs
    */
-  setCiteprocIDs (idList) {
-    if (typeof idList !== 'object' || idList === null) {
-      // Create an empty object.
-      this._citeprocIDs = Object.create(null)
-    } else {
-      // Overwrite existing array
-      this._citeprocIDs = idList
-    }
+  setCiteprocIDs (idList) { this._autocomplete.setCiteKeyCompletion(idList) }
+
+  /**
+   * Signals an update to the autocompletion to update its internal file
+   * database.
+   */
+  signalUpdateFileAutocomplete () {
+    this._autocomplete.setFileCompletion(
+      this._renderer.getCurrentDir(),
+      this._renderer.matchFile(this._currentHash)
+    )
   }
 
   /**
@@ -1186,75 +1097,6 @@ class ZettlrEditor {
   }
 
   /**
-   * This method updates both the in-text citations as well as the bibliography.
-   * @return {void} Does not return.
-   */
-  updateCitations () {
-    // This function searches for all elements with class .citeproc-citation and
-    // updates the contents of these elements based upon the ID.
-
-    // NEVER use jQuery to always query all citeproc-citations, because CodeMirror
-    // does NOT always print them! We have to manually go through the value of
-    // the code ...
-    let cnt = this._cm.getValue()
-    let totalIDs = Object.create(null)
-    let match
-    let citeprocIDRE = /@([a-z0-9_:.#$%&\-+?<>~/]+)/gi
-    let somethingUpdated = false // This flag indicates if anything has changed and justifies a new bibliography.
-    while ((match = citeprocIDRE.exec(cnt)) != null) {
-      let id = match[1]
-      totalIDs[id] = this._lastKnownCitationCluster[id] // Could be undefined.
-    }
-
-    // Now we have the correct amount of IDs in our cluster. Now fetch all
-    // citations of new ones.
-    for (let id in totalIDs) {
-      if (totalIDs[id] === undefined) {
-        totalIDs[id] = true
-        somethingUpdated = true // We have to fetch a new citation
-      }
-    }
-
-    // Check if there are some citations _missing_ from the new array
-    for (let id in this._lastKnownCitationCluster) {
-      if (totalIDs[id] === undefined) {
-        somethingUpdated = true // We only need one entry to justify an update
-        break
-      }
-    }
-
-    // Swap
-    this._lastKnownCitationCluster = totalIDs
-
-    if (Object.keys(this._lastKnownCitationCluster).length === 0) {
-      return this._renderer.setBibliography(trans('gui.citeproc.references_none'))
-    }
-
-    if (somethingUpdated) {
-      // Need to update
-      // We need to update the items first!
-      let bib = global.citeproc.updateItems(Object.keys(this._lastKnownCitationCluster))
-      if (bib === true) {
-        global.citeproc.makeBibliography() // Trigger a new bibliography build
-      } else if (bib === 1) { // 1 means booting
-        this._renderer.setBibliography(trans('gui.citeproc.references_booting'))
-        // Unset so that the update process is triggered again next time
-        this._lastKnownCitationCluster = Object.create(null)
-      } else if (bib === 3) { // There was an error
-        this._renderer.setBibliography(trans('gui.citeproc.references_error'))
-      } else if (bib === 2) { // No database loaded
-        this._renderer.setBibliography(trans('gui.citeproc.no_db'))
-      }
-    }
-  }
-
-  /**
-   * Returns the current value of the editor.
-   * @return {String} The current editor contents.
-   */
-  getValue () { return this._cm.getValue() }
-
-  /**
    * This method can be used to insert some text at the current cursor position.
    * ATTENTION: It WILL overwrite any given selection!
    * @param  {String} text The text to insert
@@ -1325,6 +1167,17 @@ class ZettlrEditor {
     * Refresh the CodeMirror instance
     */
   refresh () { this._cm.refresh() }
+
+  /**
+   * Returns the current value of the editor.
+   * @return {String} The current editor contents.
+   */
+  getValue () { return this._cm.getValue() }
+
+  /**
+   * Returns all selections in the current document.
+   */
+  getSelections () { return this._cm.doc.getSelections() }
 
   /**
    * Get the CodeMirror instance
